@@ -1,0 +1,496 @@
+#ifdef _WINDOWS
+	#include <GL/glew.h>
+#endif
+#include <SDL.h>
+#include <SDL_opengl.h>
+#include <SDL_image.h>
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+#include "ShaderProgram.h"
+#include <vector>
+#include <unordered_map>
+
+#ifdef _WINDOWS
+	#define RESOURCE_FOLDER ""
+#else
+	#define RESOURCE_FOLDER "NYUCodebase.app/Contents/Resources/"
+#endif
+
+
+
+SDL_Window* displayWindow;
+Matrix projectionMatrix;
+Matrix modelMatrix;
+Matrix viewMatrix;
+
+//seconds since program started
+float get_runtime(){
+	float ticks = (float)SDL_GetTicks() / 1000.0f;
+	return ticks;
+}
+
+
+GLuint LoadTexture(const char* filePath, int* width, int* height){
+	int w, h, comp;
+	unsigned char* image = stbi_load(filePath, &w, &h, &comp, STBI_rgb_alpha);
+
+	if (image == NULL){
+		std::cout << "Unable to load image. Make sure the path is correct\n";
+		assert(false);
+	}
+
+	*width = w;
+	*height = h;
+
+	GLuint retTexture;
+	glGenTextures(1, &retTexture);
+	glBindTexture(GL_TEXTURE_2D, retTexture);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, image);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+	stbi_image_free(image);
+	return retTexture;
+}
+
+class Sprite{
+public:
+	GLuint texture_id;
+	int pixel_width;
+	int pixel_height;
+	float aspect_ratio;
+	float x_size = 0.4f;
+	float y_size = 0.4f;
+
+
+	Sprite(const std::string& file_path){
+		texture_id = LoadTexture(file_path.c_str(), &pixel_width, &pixel_height);
+
+		aspect_ratio = (pixel_width*1.0f) / (pixel_height*1.0f);
+		x_size *= aspect_ratio;
+	}
+
+	void set_size(int x_size_, int y_size_){
+		x_size = x_size_;
+		y_size = y_size_;
+	}
+
+
+	void set_size(int x_size_){
+		x_size = x_size_;
+		y_size = x_size;
+		x_size = x_size_ * aspect_ratio;
+	}
+
+
+
+	void draw_sprite(Sprite& sprite, ShaderProgram& program){
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+		//Draws sprites pixel perfect with no blur
+		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+
+		float verts[] = {
+			-x_size, -y_size,
+			x_size, -y_size,
+			x_size, y_size,
+			-x_size, -y_size,
+			x_size, y_size,
+			-x_size, y_size
+		};
+
+		glVertexAttribPointer(program.positionAttribute, 2, GL_FLOAT, false, 0, verts);
+		glEnableVertexAttribArray(program.positionAttribute);
+
+		float texCoords[] = {
+			0.0, 1.0,
+			1.0, 1.0,
+			1.0, 0.0,
+			0.0, 1.0,
+			1.0, 0.0,
+			0.0, 0.0
+		};
+		glVertexAttribPointer(program.texCoordAttribute, 2, GL_FLOAT, false, 0, texCoords);
+		glEnableVertexAttribArray(program.texCoordAttribute);
+
+		glBindTexture(GL_TEXTURE_2D, sprite.texture_id);
+		glDrawArrays(GL_TRIANGLES, 0, 6);
+
+		glDisableVertexAttribArray(program.positionAttribute);
+		glDisableVertexAttribArray(program.texCoordAttribute);
+	}
+
+
+
+	void draw(ShaderProgram& program){
+		draw_sprite(*this, program);
+	}
+};
+
+
+
+class Animation{
+public:
+	std::vector<Sprite> sprites;
+	int animation_count;
+
+	float last_change = 0;
+	float interval = .085; //milliseconds (ms)
+	int current_index = 0;
+
+	Animation(){};
+
+	Animation(const std::string& animation_name, int animation_count_){
+		animation_count = animation_count_;
+		for (int x = 0; x < animation_count_; x++){
+			std::string file_path = RESOURCE_FOLDER"";
+			file_path += "resources/" + animation_name + "_" + std::to_string(x + 1) + ".png";
+			std::cout << "Loading file: " << file_path << std::endl;
+			Sprite new_sprite(file_path);
+
+
+			sprites.push_back(new_sprite);
+		}
+	}
+
+
+	void update(){
+		float current_runtime = get_runtime();
+		if (current_runtime - last_change > interval){
+			current_index += 1;
+			if (current_index >= sprites.size()){
+				current_index = 0;
+			}
+			last_change = get_runtime();
+		}
+	}
+
+
+	
+
+
+	void draw(ShaderProgram& program){
+		Sprite current_sprite = sprites[current_index];
+		current_sprite.draw(program);
+	}
+};
+
+
+
+
+class GameObject{
+public:
+	std::string name = "";
+	float last_change = 0;
+	float interval = .085; //milliseconds (ms)
+
+	std::unordered_map<std::string, Animation> animations;
+	std::string current_animation_name = "";
+	std::string draw_mode = "texture";
+	float pos[3];
+	float color[4];
+	float vertices[];
+
+	GameObject(const std::string& name_){
+		set_pos(0, 0);
+		name = name_;
+		set_animation("run");
+	}
+
+	void set_pos(float x, float y){
+		pos[0] = x;
+		pos[1] = y;
+	}
+
+	void set_pos(float x, float y, float z){
+		set_pos(x, y);
+		pos[2] = z;
+	}
+
+	void add_animation(const std::string& animation_name, int animation_count){
+		Animation run_animation(name + "_" + animation_name, animation_count);
+		animations[animation_name] = run_animation;
+	}
+
+	void set_animation(const std::string& animation_name){
+		current_animation_name = animation_name;
+	}
+
+
+	void move_x(float delta_x){
+		pos[0] += delta_x;
+	}
+
+	void set_x(float x_){
+		pos[0] = x_;
+	}
+
+	float total_move_amount = 0;
+
+	void update(){	
+		float move_amount = 0.0005f;
+		move_x(move_amount);
+
+		total_move_amount += move_amount;
+
+		if (total_move_amount >= 8){
+			total_move_amount = 0;
+			//set_x(-3.8);
+		}
+
+		if (animations.count(current_animation_name)){
+			animations[current_animation_name].update();
+		}
+	}
+
+
+	float x(){
+		return pos[0];
+	}
+
+	float y(){
+		return pos[1];
+	}
+
+	float z(){
+		return pos[2];
+	}
+
+	void set_color(float r, float g, float b, float a){
+		color = new float[] {r,g,b,a};
+	}
+
+
+	void set_draw_mode(const std::string& mode_){
+		draw_mode = mode_;
+	}
+
+
+	void set_verticies(float[] verts){
+		verticies = verts;
+	}
+	
+
+	void draw(ShaderProgram& program){
+		if (draw_mode == "texture"){
+			if (animations.count(current_animation_name)){
+				modelMatrix.Identity();
+				modelMatrix.Translate(x(), y(), z());
+				program.SetModelMatrix(modelMatrix);
+
+				animations[current_animation_name].draw(program);
+			}
+		}
+		else if {
+			modelMatrix.Identity();
+			modelMatrix.Translate(-3.25f, 1.1f, 0.0f);
+			shape_program.SetModelMatrix(modelMatrix);
+			float house_body_verts[] = {
+				-0.18f, 0.8f, //top left
+				-0.18f, -0.8f, // bottom left
+				0.18f, -0.8f, //bottom right
+				0.18f, 0.8f //top right
+			};
+
+			shape_program.SetColor(0.0f, 1.0f, 0.0f, 1.0f);
+
+			glVertexAttribPointer(shape_program.positionAttribute, 2, GL_FLOAT, false, 0, house_body_verts);
+			glEnableVertexAttribArray(shape_program.positionAttribute);
+			glDrawArrays(GL_QUADS, 0, 4);
+
+			glDisableVertexAttribArray(shape_program.positionAttribute);
+		}
+
+	}
+};
+
+
+
+
+
+
+int main(int argc, char *argv[])
+{
+	SDL_Init(SDL_INIT_VIDEO);
+	displayWindow = SDL_CreateWindow("My Game", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1000, 600, SDL_WINDOW_OPENGL);
+	SDL_GLContext context = SDL_GL_CreateContext(displayWindow);
+	SDL_GL_MakeCurrent(displayWindow, context);
+	#ifdef _WINDOWS
+		glewInit();
+	#endif
+
+
+
+	glViewport(0, 0, 1000, 600);
+
+
+	ShaderProgram tex_program;
+	tex_program.Load(RESOURCE_FOLDER"vertex_textured.glsl", RESOURCE_FOLDER"fragment_textured.glsl");
+	ShaderProgram shape_program;
+	shape_program.Load(RESOURCE_FOLDER"vertex.glsl", RESOURCE_FOLDER"fragment.glsl");
+
+	float lastFrameTicks = 0.0f;
+
+	GameObject hero("zero");
+	hero.add_animation("run", 14);
+	hero.set_pos(-3.8, -0.69f);
+
+
+	GameObject left_padel("left_padel");
+	left_padel.set_draw_mode("shape");
+	left_padel.set_pos(-3.8, -0.69f);
+	left_padel.set_vertices({
+		-0.18f, 0.8f, //top left
+		-0.18f, -0.8f, // bottom left
+		0.18f, -0.8f, //bottom right
+		0.18f, 0.8f //top right
+	});
+	left_padel.set_color(1.0f, 1.0f, 0.0f, 1.0f);
+
+
+	
+	Sprite lifesaver_npc_sprite(RESOURCE_FOLDER"resources/lifesaver_idle.png");
+
+	Sprite background_sprite(RESOURCE_FOLDER"resources/background.png");
+	background_sprite.set_size(5.0f);
+
+	projectionMatrix.SetOrthoProjection(-3.55, 3.55, -2.0f, 2.0f, -1.0f, 1.0f);
+	//projectionMatrix.SetOrthoProjection(-10.55, 10.55, -6.0f, 6.0f, -1.0f, 1.0f);
+
+
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+	SDL_Event event;
+	bool done = false;
+	while (!done) {
+		while (SDL_PollEvent(&event)) {
+			if (event.type == SDL_QUIT || event.type == SDL_WINDOWEVENT_CLOSE) {
+				done = true;
+			}
+
+			if (event.type == SDL_KEYDOWN) {
+				SDLKey keyPressed = event.key.keysym.sym;
+
+				switch (keyPressed) {
+					case SDLK_A:
+						gameRunning = false;
+						break;
+					case SDLK_S:
+						gameRunning = false;
+						break;
+				}
+			}
+		}
+
+
+
+		float ticks = get_runtime();
+		float elapsed = ticks - lastFrameTicks;
+		lastFrameTicks = ticks;
+
+		glClear(GL_COLOR_BUFFER_BIT);
+		
+
+		///////////////RENDER TEXTURES
+		tex_program.SetModelMatrix(modelMatrix);
+		tex_program.SetProjectionMatrix(projectionMatrix);
+		tex_program.SetViewMatrix(viewMatrix);
+		glUseProgram(tex_program.programID);
+
+
+		//draw background
+		modelMatrix.Identity();
+		modelMatrix.Translate(0.0f, -0.14f, 0.0f);
+		tex_program.SetModelMatrix(modelMatrix);
+		background_sprite.draw(tex_program);
+
+		//Draw lifesaver sprite
+		modelMatrix.Identity();
+		modelMatrix.Translate(1.5f, -0.5f, 0.0f);
+		tex_program.SetModelMatrix(modelMatrix);
+		lifesaver_npc_sprite.draw(tex_program);
+
+		//Draw hero game object
+		hero.update();
+		hero.draw(tex_program);
+
+
+
+		shape_program.SetModelMatrix(modelMatrix);
+		shape_program.SetProjectionMatrix(projectionMatrix);
+		shape_program.SetViewMatrix(viewMatrix);
+		glUseProgram(shape_program.programID);
+
+		//draw triangle)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+		//modelMatrix.Identity();
+		//modelMatrix.Translate(0.0f, 1.0f, 0.0f);
+		//shape_program.SetModelMatrix(modelMatrix);
+		//float tri_verts[] = {
+		//	0.8f, -0.5f, 
+		//	0.0f, 0.25f, 
+		//	-0.8f, -0.5f
+		//};
+
+		//shape_program.SetColor(0.2f, 0.2f, 0.51f, 1.0f);
+
+		//glVertexAttribPointer(shape_program.positionAttribute, 2, GL_FLOAT, false, 0, tri_verts);
+		//glEnableVertexAttribArray(shape_program.positionAttribute);
+		//glDrawArrays(GL_TRIANGLES, 0, 3);
+		//glDisableVertexAttribArray(shape_program.positionAttribute);
+		//end draw triangle)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+		//draw life bar)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+		modelMatrix.Identity();
+		modelMatrix.Translate(-3.25f, 1.1f, 0.0f);
+
+		left_padel.draw(shape_program);
+
+		shape_program.SetModelMatrix(modelMatrix);
+		float house_body_verts[] = {
+			-0.18f, 0.8f, //top left
+			-0.18f, -0.8f, // bottom left
+			0.18f, -0.8f, //bottom right
+			0.18f, 0.8f //top right
+		};
+
+		shape_program.SetColor(0.0f, 1.0f, 0.0f, 1.0f);
+
+		glVertexAttribPointer(shape_program.positionAttribute, 2, GL_FLOAT, false, 0, house_body_verts);
+		glEnableVertexAttribArray(shape_program.positionAttribute);
+		glDrawArrays(GL_QUADS, 0, 4);
+
+		glDisableVertexAttribArray(shape_program.positionAttribute);
+		//end draw square)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+
+		//draw square)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+		//modelMatrix.Identity();
+		//modelMatrix.Translate(-0.0f, -2.0f, 0.0f);
+		//shape_program.SetModelMatrix(modelMatrix);
+		//float quad_verts[] = { 
+		//	-4, 1, //top left
+		//	-4, -1, // bottom left
+		//	4, -1, //bottom right
+		//	4, 1 //top right
+		//};
+
+		//shape_program.SetColor(0.8f, 0.2f, 0.34f, 1.0f);
+
+		//glVertexAttribPointer(shape_program.positionAttribute, 2, GL_FLOAT, false, 0, quad_verts);
+		//glEnableVertexAttribArray(shape_program.positionAttribute);
+		//glDrawArrays(GL_QUADS, 0, 4);
+		//
+		//glDisableVertexAttribArray(shape_program.positionAttribute);
+		//end draw square)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+
+
+		SDL_GL_SwapWindow(displayWindow);
+	}
+
+	SDL_Quit();
+	return 0;
+}
